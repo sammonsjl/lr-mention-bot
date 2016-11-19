@@ -12,6 +12,7 @@
 'use strict';
 
 var githubAuthCookies = require('./githubAuthCookies');
+var config = require('./config');
 var fs = require('fs');
 var minimatch = require('minimatch');
 
@@ -163,105 +164,6 @@ function parseDiff(diff: string): Array<FileInfo> {
   return files;
 }
 
-/**
- * Sadly, github doesn't have an API to get line by line blame for a file.
- * We could git clone the repo and blame, but it's annoying to have to
- * maintain a local git repo and the blame is going to be name + email instead
- * of the github username, so we'll have to do a http request anyway.
- *
- * There are two main ways to extract information from an HTML file:
- *   - First is to work like a browser: parse the html, build a DOM tree and
- *     use a jQuery-like API to traverse the DOM and extract what you need.
- *     The big issue is that creating the DOM is --extremely-- slow.
- *   - Second is to use regex to analyze the outputted html and find whatever
- *     we want.
- *
- * I(vjeux)'ve scraped hundreds of websites using both techniques and both of
- * them have the same reliability when it comes to the website updating their
- * markup. If they change what you are extracting you are screwed and if they
- * change something around, both are resistant to it when written properly.
- * So, might as well use the fastest one of the two: regex :)
- */
-function parseBlame(blame: string): Array<string> {
-  // The way the document is structured is that commits and lines are
-  // interleaved. So every time we see a commit we grab the author's name
-  // and every time we see a line we log the last seen author.
-  var re = /(rel="(?:author|contributor)">([^<]+)<\/a> authored|<tr class="blame-line">)/g;
-
-  var currentAuthor = 'none';
-  var lines = [];
-  var match;
-  while (match = re.exec(blame)) {
-    if (match[2]) {
-      currentAuthor = match[2];
-    } else {
-      lines.push(currentAuthor);
-    }
-  }
-
-  return lines;
-}
-
-function getDeletedOwners(
-  files: Array<FileInfo>,
-  blames: { [key: string]: Array<string> }
-): { [key: string]: number } {
-  var owners = {};
-  files.forEach(function(file) {
-    var blame = blames[file['path']];
-    if (!blame) {
-      return;
-    }
-    file.deletedLines.forEach(function (line) {
-      // In a perfect world, this should never fail. However, in practice, the
-      // blame request may fail, the blame is checking against master and the
-      // pull request isn't, the blame file was too big and the curl wrapper
-      // only read the first n bytes...
-      // Since the output of the algorithm is best effort, it's better to just
-      // swallow errors and have a less accurate implementation than to crash.
-      var name = blame[line - 1];
-      if (!name) {
-        return;
-      }
-      owners[name] = (owners[name] || 0) + 1;
-    });
-  });
-  return owners;
-}
-
-function getAllOwners(
-  files: Array<FileInfo>,
-  blames: { [key: string]: Array<string> }
-): { [key: string]: number } {
-  var owners = {};
-  files.forEach(function(file) {
-    var blame = blames[file.path];
-    if (!blame) {
-      return;
-    }
-    for (var i = 0; i < blame.length; ++i) {
-      var name = blame[i];
-      if (!name) {
-        return;
-      }
-      owners[name] = (owners[name] || 0) + 1;
-    }
-  });
-  return owners;
-}
-
-function getSortedOwners(
-  owners: { [key: string]: number }
-): Array<string> {
-  var sorted_owners = Object.keys(owners);
-  sorted_owners.sort(function(a, b) {
-    var countA = owners[a];
-    var countB = owners[b];
-    return countA > countB ? -1 : (countA < countB ? 1 : 0);
-  });
-  return sorted_owners;
-}
-
 async function getDiffForPullRequest(
   owner: string,
   repo: string,
@@ -284,38 +186,6 @@ async function getDiffForPullRequest(
   });
 }
 
-async function getMatchingOwners(
-  files: Array<FileInfo>,
-  whitelist: Array<WhitelistUser>,
-  creator: string,
-  org: ?string,
-  github: Object
-): Promise<Array<string>> {
-  var owners = [];
-  var users = whitelist || [];
-
-  users.forEach(function(user) {
-    let userHasChangedFile = false;
-
-    user.files.forEach(function(pattern) {
-      if (!userHasChangedFile) {
-        userHasChangedFile = files.find(function(file) {
-          return minimatch(file.path, pattern);
-        });
-      }
-    });
-
-    if (userHasChangedFile && owners.indexOf(user.name) === -1) {
-      owners.push(user.name);
-    }
-  });
-
-  if (org) {
-    owners = await filterOwnTeam(users, owners, creator, org, github);
-  }
-  return owners;
-}
-
 async function filterOwnTeam(
   users: Array<WhitelistUser>,
   owners: Array<string>,
@@ -328,14 +198,14 @@ async function filterOwnTeam(
   })) {
     return owners;
   }
-  
+
   // GitHub does not provide an API to look up a team by name.
   // Instead, get all teams, then filter against those matching
   // our teams list who want to be excluded from their own PR's.
   var teamData = await getTeams(org, github, 0);
   teamData = teamData.filter(function(team) {
     return users.some(function(user) {
-      return user.skipTeamPrs && user.name === team.name;
+        return user.skipTeamPrs && user.name === team.name;
     });
   });
   var promises = teamData.map(function(teamInfo) {
@@ -384,132 +254,6 @@ async function cacheGet(
   return readFileAsync(cacheKey, 'utf8');
 }
 
-async function getTeams(
-  org: string,
-  github: Object,
-  page: number
-): Promise<Array<TeamData>> {
-  const perPage = 100;
-  return new Promise(function(resolve, reject) {
-    github.orgs.getTeams({
-      org: org,
-      page: page,
-      per_page: perPage
-    }, function(err, teams) {
-      if (err) {
-        reject(err);
-      } else {
-        var teamData = teams.map(function(team) {
-          return {
-            name: org + "/" + team.slug,
-            id: team.id
-          };
-        });
-        if (teamData.length === perPage) {
-          getTeams(org, github, ++page).then(function(results) {
-            resolve(teamData.concat(results));
-          })
-          .catch(reject);
-        } else {
-          resolve(teamData);
-        }
-      }
-    });
-  });
-}
-
-async function getOwnerOrgs(
-  owner: string,
-  github: Object
-): Promise<Array<string>> {
-  return new Promise(function(resolve, reject) {
-    github.orgs.getForUser({ user: owner }, function(err, result) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(
-          result.map(function (obj){
-            return obj.login;
-          })
-        );
-      }
-    });
-  });
-}
-
-async function getMembersOfOrg(
-  org: string,
-  github: Object,
-  page: number
-): Promise<Array<string>> {
-  const perPage = 100;
-  return new Promise(function(resolve, reject) {
-    github.orgs.getMembers({
-      org: org,
-      page: page,
-      per_page: perPage
-    }, function(err, members) {
-      if (err) {
-        reject(err);
-      } else {
-        var logins = members.map(function (obj){
-          return obj.login;
-        })
-        if(logins.length === perPage) {
-          getMembersOfOrg(org, github, ++page).then(function(results) {
-            resolve(logins.concat(results));
-          })
-          .catch(reject);
-        } else {
-          resolve(logins);
-        }
-      }
-    });
-  });
-}
-
-async function filterRequiredOrgs(
-  owners: Array<string>,
-  config: Object,
-  github: Object
-): Promise<Array<string>> {
-  var promises = owners.map(function(owner) {
-    return getOwnerOrgs(owner, github);
-  });
-
-  var userOrgs = await Promise.all(promises);
-  return owners.filter(function(owner, index) {
-    // user passes if he is in any of the required organizations
-    return config.requiredOrgs.some(function(reqOrg) {
-      return userOrgs[index].indexOf(reqOrg) >= 0;
-    });
-  });
-}
-
-async function getTeamMembership(
-  creator: string,
-  teamData: TeamData,
-  github: Object
-): Promise<TeamMembership> {
-  return new Promise(function(resolve, reject) {
-    github.orgs.getTeamMembership({
-      id: teamData.id,
-      user: creator
-    }, function(err, data) {
-      if (err) {
-        if (err.code === 404 &&
-                err.message === '{"message":"Not Found","documentation_url":"https://developer.github.com/v3"}') {
-          resolve({name: teamData.name, state: 'nonmember'});
-        } else {
-          reject(err);
-        }
-      } else {
-        resolve({name: teamData.name, state: data.state});
-      }
-    });
-  });
-}
-
 /**
  * If the repo is private than we should only mention users that are still part
  * of that org.
@@ -532,98 +276,54 @@ async function filterPrivateRepo(
   });
 }
 
-/**
- * The problem at hand is to find a set of three best effort people that have
- * context on a pull request. It doesn't (and actually can't) be perfect.
- *
- * The most precise information we have is when someone deletes or modifies
- * a line of code. We know who last touched those lines and they are most
- * likely good candidates for reviewing the code.
- * This is of course not always the case, people can codemod big number of
- * lines and have very little context on that particular one, people move
- * file around and absorb all the blame...
- *
- * But, not all pull requests modify code, many of them just add new lines.
- * I first played with giving credit to people that blamed the lines around
- * but it was unclear how to spread out the credit.
- * A much dumber strategy but which has proven to be effective is to
- * completely ignore new lines and instead find the people that are blamed
- * for the biggest number of lines in the file.
- *
- * Given those two observations, the algorithm is as follow:
- *  - For each line that has been deleted, give 1 ponumber to the blamed author
- *    in a 'deletedOwners' pool.
- *  - For each file that has been touched, for each line in that file, give 1
- *    ponumber to the blamed author in a 'allOwners' pool.
- *  Once you've got those two pools, sort them by number of points, dedupe
- *  them, concat them and finally take the first 3 names.
- */
-async function guessOwners(
+async function getPathInfo(
   files: Array<FileInfo>,
-  blames: { [key: string]: Array<string> },
   creator: string,
-  defaultOwners: Array<string>,
-  fallbackOwners: Array<string>,
   privateRepo: boolean,
   org: ?string,
-  config: Object,
+  repoConfig: Object,
   github: Object
-): Promise<Array<string>> {
-  var deletedOwners = getDeletedOwners(files, blames);
-  var allOwners = getAllOwners(files, blames);
+): Promise<string> {
 
-  deletedOwners = getSortedOwners(deletedOwners);
-  allOwners = getSortedOwners(allOwners);
+  var fullPath;
+  var filteredPathInfo = [];
+  var splitPath;
+  var pathInfo = config.pathInfo;
+  var foundMatch = false;
 
-  // Remove owners that are also in deletedOwners
-  var deletedOwnersSet = new Set(deletedOwners);
-  var allOwners = allOwners.filter(function(element) {
-    return !deletedOwnersSet.has(element);
+  files.filter(function (file) {
+    fullPath = file.path;
   });
 
-  var owners = []
-    .concat(deletedOwners)
-    .concat(allOwners)
-    .filter(function(owner) {
-      return owner !== 'none';
-    })
-    .filter(function(owner) {
-      return owner !== creator;
-    })
-    .filter(function(owner) {
-      return config.userBlacklist.indexOf(owner) === -1;
-    });
-
-  if (config.requiredOrgs.length > 0) {
-    owners = await filterRequiredOrgs(owners, config, github);
+  if (fullPath.indexOf("/") === -1) {
+    filteredPathInfo = pathInfo[0];
   }
+  else {
+    splitPath = fullPath.split("/");
 
-  if (privateRepo && org != null) {
-    owners = await filterPrivateRepo(owners, org, github);
+    while (!foundMatch && splitPath.length > 0) {
+      splitPath.pop();
+      pathInfo.forEach(function (entry, index) {
+        if (entry.path === splitPath.join("/") + "/") {
+          filteredPathInfo = pathInfo[index];
+          foundMatch = true;
+        }
+      })
+    }
   }
-
-  if (owners.length === 0) {
-    defaultOwners = defaultOwners.concat(fallbackOwners);
-  }
-
-  return owners
-    .slice(0, config.maxReviewers)
-    .concat(defaultOwners)
-    .filter(function(owner, index, ownersFound) {
-      return ownersFound.indexOf(owner) === index;
-    });
+  return filteredPathInfo;
 }
 
-async function guessOwnersForPullRequest(
+async function checkRepoPath(
   repoURL: string,
   id: number,
   creator: string,
   targetBranch: string,
   privateRepo: boolean,
-  org: ?string,
-  config: Object,
+  org: string,
+  repoConfig: Object,
   github: Object
-): Promise<Array<string>> {
+): Promise<string> {
   const ownerAndRepo = repoURL.split('/').slice(-2);
   const cacheKey = `${repoURL}-pull-${id}.diff`.replace(/[^a-zA-Z0-9-_\.]/g, '-');
   const diff = await cacheGet(
@@ -631,11 +331,6 @@ async function guessOwnersForPullRequest(
     () => getDiffForPullRequest(ownerAndRepo[0], ownerAndRepo[1], id, github)
   );
   var files = parseDiff(diff);
-  var defaultOwners = await getMatchingOwners(files, config.alwaysNotifyForPaths, creator, org, github);
-  var fallbackOwners = await getMatchingOwners(files, config.fallbackNotifyForPaths, creator, org, github);
-  if (!config.findPotentialReviewers) {
-      return defaultOwners;
-  }
 
   // There are going to be degenerated changes that end up modifying hundreds
   // of files. In theory, it would be good to actually run the algorithm on
@@ -648,33 +343,18 @@ async function guessOwnersForPullRequest(
     return countA > countB ? -1 : (countA < countB ? 1 : 0);
   });
   // remove files that match any of the globs in the file blacklist config
-  config.fileBlacklist.forEach(function(glob) {
+  repoConfig.fileBlacklist.forEach(function(glob) {
     files = files.filter(function(file) {
       return !minimatch(file.path, glob);
     });
   });
-  files = files.slice(0, config.numFilesToCheck);
+  files = files.slice(0, repoConfig.numFilesToCheck);
 
-  var blames = {};
-  // create blame promises (allows concurrent loading)
-  var promises = files.map(function(file) {
-    return fetch(repoURL + '/blame/' + targetBranch + '/' + file.path);
-  });
-
-  // wait for all promises to resolve
-  var results = await Promise.all(promises);
-  results.forEach(function(result, index) {
-    blames[files[index].path] = parseBlame(result);
-  });
-
-  // This is the line that implements the actual algorithm, all the lines
-  // before are there to fetch and extract the data needed.
-  return guessOwners(files, blames, creator, defaultOwners, fallbackOwners, privateRepo, org, config, github);
+  return getPathInfo(files, creator, privateRepo, org, repoConfig, github);
 }
 
 module.exports = {
   enableCachingForDebugging: false,
   parseDiff: parseDiff,
-  parseBlame: parseBlame,
-  guessOwnersForPullRequest: guessOwnersForPullRequest,
+  checkRepoPath: checkRepoPath,
 };

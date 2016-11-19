@@ -12,3 +12,9 @@ exports.github = {
   pathPrefix: process.env.GHE_PATH_PREFIX || mergedConfig.ghePathPrefix,
   port: process.env.GHE_PORT || mergedConfig.ghePort || 443
 };
+
+exports.pathInfo =
+  [
+    { "path": "", "team": "core-engineering", "subrepo": 0 },
+    { "path": "plugins-sdk/", "team": "", "subrepo": 1 },
+  ];

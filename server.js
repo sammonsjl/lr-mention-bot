@@ -63,28 +63,27 @@ github.authenticate({
 
 var app = express();
 
-function buildMentionSentence(reviewers) {
-  var atReviewers = reviewers.map(function(owner) { return '@' + owner; });
+function buildMentionSentence(pathInfo) {
+  return '@' + pathInfo.team;
+}
 
-  if (reviewers.length === 1) {
-    return atReviewers[0];
-  }
-
-  return (
-    atReviewers.slice(0, atReviewers.length - 1).join(', ') +
-    ' and ' + atReviewers[atReviewers.length - 1]
+function defaultMessageGenerator(pathInfo, pullRequester) {
+  return util.format(
+    '%s, thanks for your PR! ' +
+    'We have identified the team: %s to the reviewer. ' +
+    'Cc: @sammonsjl',
+    pullRequester,
+    buildMentionSentence(pathInfo)
   );
 }
 
-function defaultMessageGenerator(reviewers, pullRequester) {
+function subRepoMessageGenerator(pathInfo, pullRequester) {
   return util.format(
     '%s, thanks for your PR! ' +
-    'By analyzing the history of the files in this pull request' +
-    ', we identified %s to be%s potential reviewer%s.',
-    pullRequester,
-    buildMentionSentence(reviewers),
-    reviewers.length > 1 ? '' : ' a',
-    reviewers.length > 1 ? 's' : ''
+    'We have identified this to be a subrepo and cannot complete the request. ' +
+    'Please read x for more info.' +
+    'Cc: @sammonsjl',
+    pullRequester
   );
 }
 
@@ -121,59 +120,19 @@ async function work(body) {
   // default config
   var repoConfig = {
     maxReviewers: 3,
-    numFilesToCheck: 5,
+    numFilesToCheck: 1,
     userBlacklist: [],
     userBlacklistForPR: [],
-    userWhitelist: [],
     fileBlacklist: [],
     requiredOrgs: [],
-    findPotentialReviewers: true,
-    actions: ['opened'],
-    skipAlreadyAssignedPR: false,
-    skipAlreadyMentionedPR: false,
+    actions: ['reopened'],
+    skipAlreadyAssignedPR: true,
+    skipAlreadyMentionedPR: true,
     delayed: false,
     delayedUntil: '3d',
-    assignToReviewer: false,
     skipTitle: '',
     withLabel: '',
-    skipCollaboratorPR: false,
   };
-  
-  if (process.env.MENTION_BOT_CONFIG) {
-    try {
-      repoConfig = {
-        ...repoConfig,
-        ...JSON.parse(process.env.MENTION_BOT_CONFIG)
-      };
-    } catch(e) {
-      console.error(
-        'Error attempting to read the config from the environment variable ' +
-        ' MENTION_BOT_CONFIG'
-      );
-      console.error(e);
-    }
-  }
-
-  try {
-    // request config from repo
-    var configRes = await getRepoConfig({
-      user: data.repository.owner.login,
-      repo: data.repository.name,
-      path: CONFIG_PATH,
-      headers: {
-        Accept: 'application/vnd.github.v3.raw+json'
-      }
-    });
-
-    repoConfig = {...repoConfig, ...configRes};
-  } catch (e) {
-    if (e.code === 404 &&
-        e.message.match(/message.*Not Found.*documentation_url.*developer.github.com/)) {
-      console.log('Couldn\'t find ' + CONFIG_PATH + ' in repo. Continuing with default configuration.');
-    } else {
-      console.error(e);
-    }
-  }
 
   function isValid(repoConfig, data) {
     if (repoConfig.actions.indexOf(data.action) === -1) {
@@ -194,19 +153,6 @@ async function work(body) {
         data.pull_request.title.indexOf(repoConfig.skipTitle) > -1) {
       console.log('Skipping because pull request title contains: ' + repoConfig.skipTitle);
       return false;
-    }
-
-    if (repoConfig.skipCollaboratorPR) {
-      github.repos.getCollaborator({
-        user: data.repository.owner.login, // 'fbsamples'
-        repo: data.repository.name, // 'bot-testing'
-        collabuser: data.pull_request.user.login
-      }, function(err, res){
-        if (res && res.meta.status === '204 No Content') {
-          console.log('Skipping because pull request is made by collaborator.');
-          return false;
-        }
-      });
     }
 
     if (repoConfig.skipAlreadyAssignedPR &&
@@ -246,7 +192,7 @@ async function work(body) {
     org = data.organization.login;
   }
 
-  var reviewers = await mentionBot.guessOwnersForPullRequest(
+  var pathInfo = await mentionBot.checkRepoPath(
     data.repository.html_url, // 'https://github.com/fbsamples/bot-testing'
     data.pull_request.number, // 23
     data.pull_request.user.login, // 'mention-bot'
@@ -257,26 +203,29 @@ async function work(body) {
     github
   );
 
-  console.log('Reviewers:', reviewers);
+    console.log('pathInfo:', pathInfo);
 
-  if (reviewers.length === 0) {
-    console.log('Skipping because there are no reviewers found.');
+  if (pathInfo.length === 0) {
+    console.log('Skipping because there is no pathInfo found.');
     return;
   }
 
   var message = null;
-  if (repoConfig.message) {
-    message = configMessageGenerator(
-      repoConfig.message,
-      reviewers,
-      '@' + data.pull_request.user.login
-    );
-  } else {
+  if (pathInfo.subrepo === 0) {
     message = messageGenerator(
-      reviewers,
+      pathInfo,
       '@' + data.pull_request.user.login, // pull-requester
       buildMentionSentence,
       defaultMessageGenerator
+    );
+  }
+
+  if (pathInfo.subrepo === 1) {
+    message = messageGenerator(
+      pathInfo,
+      '@' + data.pull_request.user.login, // pull-requester
+      buildMentionSentence,
+      subRepoMessageGenerator
     );
   }
 
@@ -293,25 +242,6 @@ async function work(body) {
         }
       }
     })
-  }
-
-  function assignReviewer(data, reviewers, reject) {
-    if (!repoConfig.assignToReviewer) {
-      return;
-    }
-
-    github.issues.edit({
-      user: data.repository.owner.login, // 'fbsamples'
-      repo: data.repository.name, // 'bot-testing'
-      number: data.pull_request.number, // 23
-      assignees: reviewers
-    }, function(err) {
-      if (err) {
-        if (typeof reject === 'function') {
-          return reject(err);
-        }
-      }
-    });
   }
 
   function getComments(data, page) {
@@ -363,12 +293,10 @@ async function work(body) {
         }
 
         createComment(currentData, message, reject);
-        assignReviewer(currentData, reviewers, reject);
       });
     });
   } else {
     createComment(data, message);
-    assignReviewer(data, reviewers);
   }
 
   return;

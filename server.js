@@ -70,7 +70,7 @@ function buildMentionSentence(pathInfo) {
 function defaultMessageGenerator(pathInfo, pullRequester) {
   return util.format(
     '%s, thanks for your PR! ' +
-    'We have identified the team: %s to the reviewer. ' +
+    'We have identified the team: %s to be the reviewer. ' +
     'Cc: @sammonsjl',
     pullRequester,
     buildMentionSentence(pathInfo)

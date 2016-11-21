@@ -1,5 +1,5 @@
 {
-	"id": "nodejs",
+	"id": "mention-bot",
 	"type": "wedeploy/nodejs",
 	"hooks": {
 		"build": "npm install"

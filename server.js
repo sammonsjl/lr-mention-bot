@@ -206,7 +206,7 @@ async function work(body) {
     console.log('pathInfo:', pathInfo);
 
   if (pathInfo.length === 0) {
-    console.log('Skipping because there is no pathInfo found.');
+    console.log('Skipping because entry not found');
     return;
   }
 

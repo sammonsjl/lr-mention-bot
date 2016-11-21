@@ -2,3 +2,5 @@ node_modules
 npm-debug.log
 .idea
 .vscode
+jsconfig.json
+typings.json

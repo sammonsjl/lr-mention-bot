@@ -13,8 +13,4 @@ exports.github = {
   port: process.env.GHE_PORT || mergedConfig.ghePort || 443
 };
 
-exports.pathInfo =
-  [
-    { "path": "", "team": "core-engineering", "subrepo": 0 },
-    { "path": "plugins-sdk/", "team": "", "subrepo": 1 },
-  ];
+exports.pathInfo = mergedConfig.pathInfo;

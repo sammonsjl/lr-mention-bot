@@ -1,1 +1,4 @@
-{}
+{"pathInfo":[    
+    { "path":"", "team":"core-engineering", "subrepo":0 },
+    { "path":"plugins-sdk/","team":"", "subrepo":1 }
+]}

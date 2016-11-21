@@ -81,7 +81,7 @@ function subRepoMessageGenerator(pathInfo, pullRequester) {
   return util.format(
     '%s, thanks for your PR! ' +
     'We have identified this to be a subrepo and cannot complete the request. ' +
-    'Please read x for more info.' +
+    'Please read x for more info. ' +
     'Cc: @sammonsjl',
     pullRequester
   );
@@ -315,8 +315,7 @@ app.post('/', function(req, res) {
 
 app.get('/', function(req, res) {
   res.send(
-    'GitHub Mention Bot Active. ' +
-    'Go to https://github.com/facebook/mention-bot for more information.'
+    'Liferay GitHub Mention Bot Active.'
   );
 });
 
